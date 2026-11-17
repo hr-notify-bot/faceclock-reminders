@@ -195,12 +195,11 @@ async function processLeaveNotifications(){
 
   var jobs = [];
 
-  function notifyTarget(lv, target, requesterName){
+  function notifyTarget(lv, target, requesterName, stageText){
     var key = lv.id + "_" + lv.status + "_" + target.id;
     if(notified[key]) return;
     notified[key] = true; // guard against sending twice within the same run
     var range = lv.start === lv.end ? lv.start : (lv.start + " – " + lv.end);
-    var stageText = lv.status === "รออนุมัติ (หัวหน้าทีม)" ? "รอคุณอนุมัติในฐานะหัวหน้าทีม" : "รอ HR อนุมัติ";
     var text = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
     jobs.push(
       tgCall("sendMessage", { chat_id: target.telegramChatId, text: text }).then(function(){
@@ -217,15 +216,16 @@ async function processLeaveNotifications(){
     var requesterName = requester.nickname || requester.name;
 
     if(lv.status === "รออนุมัติ (HR)"){
-      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName); });
+      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "รอ HR อนุมัติ"); });
       return;
     }
     // รออนุมัติ (หัวหน้าทีม)
     if(requester.supervisorId){
       var supervisor = empById[requester.supervisorId];
-      if(supervisor && supervisor.telegramChatId) notifyTarget(lv, supervisor, requesterName);
+      if(supervisor && supervisor.telegramChatId) notifyTarget(lv, supervisor, requesterName, "รอคุณอนุมัติในฐานะหัวหน้าทีม");
     } else {
-      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName); });
+      // no supervisor assigned — this employee reports straight to HR, so the recipient here is acting as HR, not as "their supervisor"
+      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR"); });
     }
   });
 
