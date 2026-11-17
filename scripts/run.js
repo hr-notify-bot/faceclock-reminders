@@ -171,6 +171,7 @@ var HR_ROLES = { hr: 1, admin: 1, ceo: 1 };
 // Notifies whoever is the current required approver (same chain as the app's canApprove()/requiredApproverUidFor()):
 // the requester's own supervisor while a leave is at "รออนุมัติ (หัวหน้าทีม)" (or every connected HR/admin/ceo if
 // the requester has no supervisor), then every connected HR/admin/ceo once it reaches "รออนุมัติ (HR)".
+// Also notifies the REQUESTER once the leave reaches a final result ("อนุมัติแล้ว" or "ไม่อนุมัติ").
 async function processLeaveNotifications(){
   var results = await Promise.all([
     db.collection("employees").get(),
@@ -208,11 +209,34 @@ async function processLeaveNotifications(){
     );
   }
 
+  // Notifies the REQUESTER once their leave reaches a final result (approved or rejected) — separate
+  // from notifyTarget() above, which notifies the approver while a leave is still pending.
+  function notifyRequesterResult(lv, requester){
+    var key = lv.id + "_" + lv.status + "_" + requester.id;
+    if(notified[key]) return;
+    notified[key] = true;
+    if(!requester.telegramChatId) return;
+    var range = lv.start === lv.end ? lv.start : (lv.start + " – " + lv.end);
+    var text = lv.status === "อนุมัติแล้ว"
+      ? ("✅ ใบลา" + lv.type + " (" + range + ") ของคุณได้รับการอนุมัติแล้วครับ")
+      : ("❌ ใบลา" + lv.type + " (" + range + ") ของคุณไม่ได้รับการอนุมัติครับ");
+    jobs.push(
+      tgCall("sendMessage", { chat_id: requester.telegramChatId, text: text }).then(function(){
+        return db.collection("telegramLeaveNotified").add({ leaveId: lv.id, status: lv.status, targetEmpId: requester.id, sentAt: new Date().toISOString() });
+      })
+    );
+  }
+
   leaveSnap.forEach(function(doc){
     var lv = Object.assign({ id: doc.id }, doc.data());
-    if(lv.status !== "รออนุมัติ (หัวหน้าทีม)" && lv.status !== "รออนุมัติ (HR)") return;
     var requester = empById[lv.empId];
     if(!requester) return;
+
+    if(lv.status === "อนุมัติแล้ว" || lv.status === "ไม่อนุมัติ"){
+      notifyRequesterResult(lv, requester);
+      return;
+    }
+    if(lv.status !== "รออนุมัติ (หัวหน้าทีม)" && lv.status !== "รออนุมัติ (HR)") return;
     var requesterName = requester.nickname || requester.name;
 
     if(lv.status === "รออนุมัติ (HR)"){
