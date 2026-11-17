@@ -144,9 +144,9 @@ async function processReminders(){
     // check-in reminders (only while not checked in yet today)
     if((!rec || !rec.checkIn) && checkinLimit != null){
       if(nowMin >= checkinLimit - BEFORE_LEAD_MIN && nowMin < checkinLimit){
-        remind(emp, "in_before", "⏰ ใกล้ถึงเวลาเข้างานแล้วนะครับ อย่าลืมสแกนหน้าเข้างาน!");
+        remind(emp, "in_before", "⏰ ใกล้ถึงเวลาเข้างานแล้วนะครับ อย่าลืมสแกนหน้าเข้างานนะ!");
       }
-      if(nowMin >= checkinLimit && nowMin <= checkinLimit + AFTER_TAIL_MIN){
+      if(nowMin > checkinLimit && nowMin <= checkinLimit + AFTER_TAIL_MIN){
         remind(emp, "in_after", "⚠️ เลยเวลาเข้างานแล้วนะครับ ยังไม่เห็นสแกนเข้างานเลย รีบสแกนด้วยนะครับ!");
       }
     }
@@ -154,9 +154,9 @@ async function processReminders(){
     // check-out reminders (only for fixed-schedule shifts; flex shifts have no fixed checkout deadline)
     if(emp.shift === "fixed" && rec && rec.checkIn && !rec.checkOut && eff.winEnd != null){
       if(nowMin >= eff.winEnd - BEFORE_LEAD_MIN && nowMin < eff.winEnd){
-        remind(emp, "out_before", "⏰ ใกล้ถึงเวลาเลิกงานแล้วนะครับ อย่าลืมสแกนหน้าออกงาน!");
+        remind(emp, "out_before", "⏰ ใกล้ถึงเวลาเลิกงานแล้วนะครับ อย่าลืมสแกนหน้าออกงานนะ!");
       }
-      if(nowMin >= eff.winEnd && nowMin <= eff.winEnd + AFTER_TAIL_MIN){
+      if(nowMin > eff.winEnd && nowMin <= eff.winEnd + AFTER_TAIL_MIN){
         remind(emp, "out_after", "⚠️ เลยเวลาเลิกงานแล้วนะครับ ยังไม่เห็นสแกนออกงานเลย อย่าลืมสแกนด้วยนะครับ!");
       }
     }
