@@ -144,7 +144,7 @@ async function processReminders(){
     // check-in reminders (only while not checked in yet today)
     if((!rec || !rec.checkIn) && checkinLimit != null){
       if(nowMin >= checkinLimit - BEFORE_LEAD_MIN && nowMin < checkinLimit){
-        remind(emp, "in_before", "⏰ ใกล้ถึงเวลาเข้างานแล้วนะครับ อย่าลืมสแกนหน้าเข้างานนะ!");
+        remind(emp, "in_before", "⏰ ใกล้ถึงเวลาเข้างานแล้วนะครับ อย่าลืมสแกนหน้าเข้างาน!");
       }
       if(nowMin > checkinLimit && nowMin <= checkinLimit + AFTER_TAIL_MIN){
         remind(emp, "in_after", "⚠️ เลยเวลาเข้างานแล้วนะครับ ยังไม่เห็นสแกนเข้างานเลย รีบสแกนด้วยนะครับ!");
@@ -154,11 +154,78 @@ async function processReminders(){
     // check-out reminders (only for fixed-schedule shifts; flex shifts have no fixed checkout deadline)
     if(emp.shift === "fixed" && rec && rec.checkIn && !rec.checkOut && eff.winEnd != null){
       if(nowMin >= eff.winEnd - BEFORE_LEAD_MIN && nowMin < eff.winEnd){
-        remind(emp, "out_before", "⏰ ใกล้ถึงเวลาเลิกงานแล้วนะครับ อย่าลืมสแกนหน้าออกงานนะ!");
+        remind(emp, "out_before", "⏰ ใกล้ถึงเวลาเลิกงานแล้วนะครับ อย่าลืมสแกนหน้าออกงาน!");
       }
       if(nowMin > eff.winEnd && nowMin <= eff.winEnd + AFTER_TAIL_MIN){
         remind(emp, "out_after", "⚠️ เลยเวลาเลิกงานแล้วนะครับ ยังไม่เห็นสแกนออกงานเลย อย่าลืมสแกนด้วยนะครับ!");
       }
+    }
+  });
+
+  await Promise.all(jobs);
+}
+
+var HR_ROLES = { hr: 1, admin: 1, ceo: 1 };
+
+// Separate from processReminders() above — does not touch or depend on the check-in/out shift reminders at all.
+// Notifies whoever is the current required approver (same chain as the app's canApprove()/requiredApproverUidFor()):
+// the requester's own supervisor while a leave is at "รออนุมัติ (หัวหน้าทีม)" (or every connected HR/admin/ceo if
+// the requester has no supervisor), then every connected HR/admin/ceo once it reaches "รออนุมัติ (HR)".
+async function processLeaveNotifications(){
+  var results = await Promise.all([
+    db.collection("employees").get(),
+    db.collection("leaves").get(),
+    db.collection("telegramLeaveNotified").get()
+  ]);
+  var empSnap = results[0], leaveSnap = results[1], notifiedSnap = results[2];
+
+  var empById = {};
+  var hrTargets = [];
+  empSnap.forEach(function(doc){
+    var e = Object.assign({ id: doc.id }, doc.data());
+    empById[e.id] = e;
+    if(HR_ROLES[e.role] && e.telegramChatId) hrTargets.push(e);
+  });
+
+  var notified = {};
+  notifiedSnap.forEach(function(doc){
+    var n = doc.data();
+    notified[n.leaveId + "_" + n.status + "_" + n.targetEmpId] = true;
+  });
+
+  var jobs = [];
+
+  function notifyTarget(lv, target, requesterName){
+    var key = lv.id + "_" + lv.status + "_" + target.id;
+    if(notified[key]) return;
+    notified[key] = true; // guard against sending twice within the same run
+    var range = lv.start === lv.end ? lv.start : (lv.start + " – " + lv.end);
+    var stageText = lv.status === "รออนุมัติ (หัวหน้าทีม)" ? "รอคุณอนุมัติในฐานะหัวหน้าทีม" : "รอ HR อนุมัติ";
+    var text = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
+    jobs.push(
+      tgCall("sendMessage", { chat_id: target.telegramChatId, text: text }).then(function(){
+        return db.collection("telegramLeaveNotified").add({ leaveId: lv.id, status: lv.status, targetEmpId: target.id, sentAt: new Date().toISOString() });
+      })
+    );
+  }
+
+  leaveSnap.forEach(function(doc){
+    var lv = Object.assign({ id: doc.id }, doc.data());
+    if(lv.status !== "รออนุมัติ (หัวหน้าทีม)" && lv.status !== "รออนุมัติ (HR)") return;
+    var requester = empById[lv.empId];
+    if(!requester) return;
+    var requesterName = requester.nickname || requester.name;
+
+    if(lv.status === "รออนุมัติ (HR)"){
+      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName); });
+      return;
+    }
+    // รออนุมัติ (หัวหน้าทีม)
+    if(requester.supervisorId){
+      var supervisor = empById[requester.supervisorId];
+      if(supervisor && supervisor.telegramChatId) notifyTarget(lv, supervisor, requesterName);
+    } else {
+      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName); });
     }
   });
 
@@ -172,4 +239,7 @@ async function processReminders(){
   try{
     await processReminders();
   }catch(e){ console.error("reminder error", e); }
+  try{
+    await processLeaveNotifications();
+  }catch(e){ console.error("leave notification error", e); }
 })();
