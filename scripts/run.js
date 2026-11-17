@@ -256,6 +256,47 @@ async function processLeaveNotifications(){
   await Promise.all(jobs);
 }
 
+// Separate from the functions above — notifies every connected, active employee once per new
+// company announcement (dedup via telegramAnnouncementNotified, keyed by announcement+employee).
+async function processAnnouncementNotifications(){
+  var results = await Promise.all([
+    db.collection("employees").get(),
+    db.collection("announcements").get(),
+    db.collection("telegramAnnouncementNotified").get()
+  ]);
+  var empSnap = results[0], annSnap = results[1], notifiedSnap = results[2];
+
+  var targets = [];
+  empSnap.forEach(function(doc){
+    var e = Object.assign({ id: doc.id }, doc.data());
+    if(e.active !== false && e.telegramChatId) targets.push(e);
+  });
+
+  var notified = {};
+  notifiedSnap.forEach(function(doc){
+    var n = doc.data();
+    notified[n.annId + "_" + n.targetEmpId] = true;
+  });
+
+  var jobs = [];
+  annSnap.forEach(function(doc){
+    var ann = Object.assign({ id: doc.id }, doc.data());
+    targets.forEach(function(t){
+      var key = ann.id + "_" + t.id;
+      if(notified[key]) return;
+      notified[key] = true;
+      var text = "📢 ประกาศใหม่: " + ann.title + "\n" + ann.body + "\n— " + ann.author;
+      jobs.push(
+        tgCall("sendMessage", { chat_id: t.telegramChatId, text: text }).then(function(){
+          return db.collection("telegramAnnouncementNotified").add({ annId: ann.id, targetEmpId: t.id, sentAt: new Date().toISOString() });
+        })
+      );
+    });
+  });
+
+  await Promise.all(jobs);
+}
+
 (async function main(){
   try{
     await processRegistrations();
@@ -266,4 +307,7 @@ async function processLeaveNotifications(){
   try{
     await processLeaveNotifications();
   }catch(e){ console.error("leave notification error", e); }
+  try{
+    await processAnnouncementNotifications();
+  }catch(e){ console.error("announcement notification error", e); }
 })();
