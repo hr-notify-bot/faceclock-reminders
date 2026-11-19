@@ -217,11 +217,18 @@ async function processLeaveNotifications(){
     sendAndMark(lv, owner.telegramChatId, "CC_" + OWNER_UID, "👁 (สำเนาแจ้งเตือน)\n" + text);
   }
 
-  function notifyTarget(lv, target, requesterName, stageText){
+  // stageText is addressed to the actual approver ("รอคุณอนุมัติ..."); ccStageText is the same stage
+  // described in neutral/third-person form, since the owner's CC copy isn't necessarily the one who
+  // needs to act (e.g. they aren't HR, just watching) — reusing stageText verbatim in the CC would
+  // wrongly claim "you, as HR, need to approve this" even when the owner holds a different role.
+  function notifyTarget(lv, target, requesterName, stageText, ccStageText){
     var range = lv.start === lv.end ? lv.start : (lv.start + " – " + lv.end);
     var text = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
     sendAndMark(lv, target.telegramChatId, target.id, text);
-    if(target.id !== OWNER_UID) ccOwner(lv, text);
+    if(target.id !== OWNER_UID){
+      var ccText = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\nสถานะ: " + ccStageText;
+      ccOwner(lv, ccText);
+    }
   }
 
   // Notifies the REQUESTER once their leave reaches a final result (approved or rejected) — separate
@@ -251,16 +258,16 @@ async function processLeaveNotifications(){
     var requesterName = requester.nickname || requester.name;
 
     if(lv.status === "รออนุมัติ (HR)"){
-      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "รอ HR อนุมัติ"); });
+      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "รอ HR อนุมัติ", "รอ HR อนุมัติ"); });
       return;
     }
     // รออนุมัติ (หัวหน้าทีม)
     if(requester.supervisorId){
       var supervisor = empById[requester.supervisorId];
-      if(supervisor && supervisor.telegramChatId) notifyTarget(lv, supervisor, requesterName, "รอคุณอนุมัติในฐานะหัวหน้าทีม");
+      if(supervisor && supervisor.telegramChatId) notifyTarget(lv, supervisor, requesterName, "รอคุณอนุมัติในฐานะหัวหน้าทีม", "รอหัวหน้าทีมอนุมัติ");
     } else {
       // no supervisor assigned — this employee reports straight to HR, so the recipient here is acting as HR, not as "their supervisor"
-      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR"); });
+      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR", "ไม่มีหัวหน้าทีม รอ HR อนุมัติ"); });
     }
   });
 
@@ -313,9 +320,12 @@ async function processSwapNotifications(){
     sendAndMark(s, owner.telegramChatId, "CC_" + OWNER_UID, "👁 (สำเนาแจ้งเตือน)\n" + text);
   }
 
-  function notifyOne(s, target, text){
+  // ccText defaults to text, but any message addressed to the target as "คุณ" ("กับคุณ", "ของคุณ")
+  // needs a neutral third-person version instead, since the owner's CC copy may not be that target —
+  // see the equivalent comment in processLeaveNotifications() for why.
+  function notifyOne(s, target, text, ccText){
     if(target.telegramChatId) sendAndMark(s, target.telegramChatId, target.id, text);
-    if(target.id !== OWNER_UID) ccOwner(s, text);
+    if(target.id !== OWNER_UID) ccOwner(s, ccText || text);
   }
 
   swapSnap.forEach(function(doc){
@@ -334,11 +344,13 @@ async function processSwapNotifications(){
       return;
     }
     if(s.status === "ปฏิเสธโดยเพื่อนร่วมงาน"){
-      notifyOne(s, req, "❌ " + tgtName + " ปฏิเสธคำขอสลับวันหยุดของคุณ (" + range + ") ครับ");
+      notifyOne(s, req, "❌ " + tgtName + " ปฏิเสธคำขอสลับวันหยุดของคุณ (" + range + ") ครับ",
+        "❌ " + tgtName + " ปฏิเสธคำขอสลับวันหยุดของ " + reqName + " (" + range + ") ครับ");
       return;
     }
     if(s.status === "รอเพื่อนยืนยัน"){
-      notifyOne(s, tgt, "🔁 " + reqName + " ขอสลับวันหยุดกับคุณ (" + range + ") — เข้าแอป FaceClock HR เพื่อยืนยันครับ");
+      notifyOne(s, tgt, "🔁 " + reqName + " ขอสลับวันหยุดกับคุณ (" + range + ") — เข้าแอป FaceClock HR เพื่อยืนยันครับ",
+        "🔁 " + reqName + " ขอสลับวันหยุดกับ " + tgtName + " (" + range + ") — รอ " + tgtName + " ยืนยัน");
       return;
     }
     if(s.status === "รออนุมัติ"){
@@ -399,11 +411,16 @@ async function processSelfSwapNotifications(){
     sendAndMark(r, owner.telegramChatId, "CC_" + OWNER_UID, "👁 (สำเนาแจ้งเตือน)\n" + text);
   }
 
-  function notifyTarget(r, target, requesterName, stageText){
+  // ccStageText is the neutral/third-person version of stageText — see the comment on the equivalent
+  // function in processLeaveNotifications() for why the CC copy can't just reuse the "รอคุณอนุมัติ..." text.
+  function notifyTarget(r, target, requesterName, stageText, ccStageText){
     var range = "หยุด " + r.myDate + " / ทำงานแทน " + r.theirDate;
     var text = "🔁 " + requesterName + " ขอเปลี่ยนวันหยุดของตัวเอง (" + range + ")\nเหตุผล: " + (r.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
     if(target.telegramChatId) sendAndMark(r, target.telegramChatId, target.id, text);
-    if(target.id !== OWNER_UID) ccOwner(r, text);
+    if(target.id !== OWNER_UID){
+      var ccText = "🔁 " + requesterName + " ขอเปลี่ยนวันหยุดของตัวเอง (" + range + ")\nเหตุผล: " + (r.reason || "-") + "\nสถานะ: " + ccStageText;
+      ccOwner(r, ccText);
+    }
   }
 
   function notifyRequesterResult(r, requester){
@@ -412,7 +429,10 @@ async function processSelfSwapNotifications(){
       ? ("✅ คำขอเปลี่ยนวันหยุดของคุณ (" + range + ") ได้รับการอนุมัติแล้วครับ")
       : ("❌ คำขอเปลี่ยนวันหยุดของคุณ (" + range + ") ไม่ได้รับการอนุมัติครับ");
     if(requester.telegramChatId) sendAndMark(r, requester.telegramChatId, requester.id, text);
-    if(requester.id !== OWNER_UID) ccOwner(r, text);
+    if(requester.id !== OWNER_UID){
+      var requesterName = requester.nickname || requester.name;
+      ccOwner(r, (r.status === "อนุมัติแล้ว" ? "✅ " : "❌ ") + requesterName + " — คำขอเปลี่ยนวันหยุด (" + range + ") " + (r.status === "อนุมัติแล้ว" ? "ได้รับการอนุมัติแล้ว" : "ไม่ได้รับการอนุมัติ"));
+    }
   }
 
   reqSnap.forEach(function(doc){
@@ -428,14 +448,14 @@ async function processSelfSwapNotifications(){
     var requesterName = requester.nickname || requester.name;
 
     if(r.status === "รออนุมัติ (HR)"){
-      hrTargets.forEach(function(t){ notifyTarget(r, t, requesterName, "รอ HR อนุมัติ"); });
+      hrTargets.forEach(function(t){ notifyTarget(r, t, requesterName, "รอ HR อนุมัติ", "รอ HR อนุมัติ"); });
       return;
     }
     if(requester.supervisorId){
       var supervisor = empById[requester.supervisorId];
-      if(supervisor && supervisor.telegramChatId) notifyTarget(r, supervisor, requesterName, "รอคุณอนุมัติในฐานะหัวหน้าทีม");
+      if(supervisor && supervisor.telegramChatId) notifyTarget(r, supervisor, requesterName, "รอคุณอนุมัติในฐานะหัวหน้าทีม", "รอหัวหน้าทีมอนุมัติ");
     } else {
-      hrTargets.forEach(function(t){ notifyTarget(r, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR"); });
+      hrTargets.forEach(function(t){ notifyTarget(r, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR", "ไม่มีหัวหน้าทีม รอ HR อนุมัติ"); });
     }
   });
 
