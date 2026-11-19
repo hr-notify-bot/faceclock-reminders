@@ -166,12 +166,16 @@ async function processReminders(){
 }
 
 var HR_ROLES = { hr: 1, admin: 1, ceo: 1 };
+var OWNER_UID = "DRcDoZia2uQmxvYXN5cM61JX5h23";
 
 // Separate from processReminders() above — does not touch or depend on the check-in/out shift reminders at all.
 // Notifies whoever is the current required approver (same chain as the app's canApprove()/requiredApproverUidFor()):
 // the requester's own supervisor while a leave is at "รออนุมัติ (หัวหน้าทีม)" (or every connected HR/admin/ceo if
 // the requester has no supervisor), then every connected HR/admin/ceo once it reaches "รออนุมัติ (HR)".
 // Also notifies the REQUESTER once the leave reaches a final result ("อนุมัติแล้ว" or "ไม่อนุมัติ").
+// The owner (OWNER_UID) additionally gets a CC copy of every stage so they can follow the whole chain
+// without having to be the direct approver at each step — requested after a routing mix-up where they
+// only saw the later-stage message and assumed it was the first/only one.
 async function processLeaveNotifications(){
   var results = await Promise.all([
     db.collection("employees").get(),
@@ -187,6 +191,7 @@ async function processLeaveNotifications(){
     empById[e.id] = e;
     if(HR_ROLES[e.role] && e.telegramChatId) hrTargets.push(e);
   });
+  var owner = empById[OWNER_UID];
 
   var notified = {};
   notifiedSnap.forEach(function(doc){
@@ -196,35 +201,41 @@ async function processLeaveNotifications(){
 
   var jobs = [];
 
-  function notifyTarget(lv, target, requesterName, stageText){
-    var key = lv.id + "_" + lv.status + "_" + target.id;
+  function sendAndMark(lv, chatId, targetEmpId, text){
+    var key = lv.id + "_" + lv.status + "_" + targetEmpId;
     if(notified[key]) return;
     notified[key] = true; // guard against sending twice within the same run
-    var range = lv.start === lv.end ? lv.start : (lv.start + " – " + lv.end);
-    var text = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
     jobs.push(
-      tgCall("sendMessage", { chat_id: target.telegramChatId, text: text }).then(function(){
-        return db.collection("telegramLeaveNotified").add({ leaveId: lv.id, status: lv.status, targetEmpId: target.id, sentAt: new Date().toISOString() });
+      tgCall("sendMessage", { chat_id: chatId, text: text }).then(function(){
+        return db.collection("telegramLeaveNotified").add({ leaveId: lv.id, status: lv.status, targetEmpId: targetEmpId, sentAt: new Date().toISOString() });
       })
     );
+  }
+
+  function ccOwner(lv, text){
+    if(!owner || !owner.telegramChatId) return;
+    sendAndMark(lv, owner.telegramChatId, "CC_" + OWNER_UID, "👁 (สำเนาแจ้งเตือน)\n" + text);
+  }
+
+  function notifyTarget(lv, target, requesterName, stageText){
+    var range = lv.start === lv.end ? lv.start : (lv.start + " – " + lv.end);
+    var text = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
+    sendAndMark(lv, target.telegramChatId, target.id, text);
+    if(target.id !== OWNER_UID) ccOwner(lv, text);
   }
 
   // Notifies the REQUESTER once their leave reaches a final result (approved or rejected) — separate
   // from notifyTarget() above, which notifies the approver while a leave is still pending.
   function notifyRequesterResult(lv, requester){
-    var key = lv.id + "_" + lv.status + "_" + requester.id;
-    if(notified[key]) return;
-    notified[key] = true;
-    if(!requester.telegramChatId) return;
     var range = lv.start === lv.end ? lv.start : (lv.start + " – " + lv.end);
     var text = lv.status === "อนุมัติแล้ว"
       ? ("✅ ใบลา" + lv.type + " (" + range + ") ของคุณได้รับการอนุมัติแล้วครับ")
       : ("❌ ใบลา" + lv.type + " (" + range + ") ของคุณไม่ได้รับการอนุมัติครับ");
-    jobs.push(
-      tgCall("sendMessage", { chat_id: requester.telegramChatId, text: text }).then(function(){
-        return db.collection("telegramLeaveNotified").add({ leaveId: lv.id, status: lv.status, targetEmpId: requester.id, sentAt: new Date().toISOString() });
-      })
-    );
+    if(requester.telegramChatId) sendAndMark(lv, requester.telegramChatId, requester.id, text);
+    if(requester.id !== OWNER_UID){
+      var requesterName = requester.nickname || requester.name;
+      ccOwner(lv, (lv.status === "อนุมัติแล้ว" ? "✅ " : "❌ ") + requesterName + " — ใบลา" + lv.type + " (" + range + ") " + (lv.status === "อนุมัติแล้ว" ? "ได้รับการอนุมัติแล้ว" : "ไม่ได้รับการอนุมัติ"));
+    }
   }
 
   leaveSnap.forEach(function(doc){
@@ -250,6 +261,181 @@ async function processLeaveNotifications(){
     } else {
       // no supervisor assigned — this employee reports straight to HR, so the recipient here is acting as HR, not as "their supervisor"
       hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR"); });
+    }
+  });
+
+  await Promise.all(jobs);
+}
+
+// Notifies the coworker-swap chain (same stages as the app's canApproveSwap()):
+// the target coworker while "รอเพื่อนยืนยัน", then whoever approves (the requester's+target's shared
+// supervisor if both report to the same one, else every connected HR/admin/ceo) while "รออนุมัติ",
+// then the requester (and, once actually approved, the target too — their shift changes as well)
+// once the request reaches a final result. Owner gets a CC of every stage, same as leave notifications.
+async function processSwapNotifications(){
+  var results = await Promise.all([
+    db.collection("employees").get(),
+    db.collection("swapRequests").get(),
+    db.collection("telegramSwapNotified").get()
+  ]);
+  var empSnap = results[0], swapSnap = results[1], notifiedSnap = results[2];
+
+  var empById = {};
+  var hrTargets = [];
+  empSnap.forEach(function(doc){
+    var e = Object.assign({ id: doc.id }, doc.data());
+    empById[e.id] = e;
+    if(HR_ROLES[e.role] && e.telegramChatId) hrTargets.push(e);
+  });
+  var owner = empById[OWNER_UID];
+
+  var notified = {};
+  notifiedSnap.forEach(function(doc){
+    var n = doc.data();
+    notified[n.swapId + "_" + n.status + "_" + n.targetEmpId] = true;
+  });
+
+  var jobs = [];
+
+  function sendAndMark(s, chatId, targetEmpId, text){
+    var key = s.id + "_" + s.status + "_" + targetEmpId;
+    if(notified[key]) return;
+    notified[key] = true;
+    jobs.push(
+      tgCall("sendMessage", { chat_id: chatId, text: text }).then(function(){
+        return db.collection("telegramSwapNotified").add({ swapId: s.id, status: s.status, targetEmpId: targetEmpId, sentAt: new Date().toISOString() });
+      })
+    );
+  }
+
+  function ccOwner(s, text){
+    if(!owner || !owner.telegramChatId) return;
+    sendAndMark(s, owner.telegramChatId, "CC_" + OWNER_UID, "👁 (สำเนาแจ้งเตือน)\n" + text);
+  }
+
+  function notifyOne(s, target, text){
+    if(target.telegramChatId) sendAndMark(s, target.telegramChatId, target.id, text);
+    if(target.id !== OWNER_UID) ccOwner(s, text);
+  }
+
+  swapSnap.forEach(function(doc){
+    var s = Object.assign({ id: doc.id }, doc.data());
+    var req = empById[s.requesterId], tgt = empById[s.targetId];
+    if(!req || !tgt) return;
+    var reqName = req.nickname || req.name, tgtName = tgt.nickname || tgt.name;
+    var range = "หยุด " + s.myDate + " / ทำงานแทน " + s.theirDate;
+
+    if(s.status === "อนุมัติแล้ว" || s.status === "ไม่อนุมัติ"){
+      var resultText = s.status === "อนุมัติแล้ว"
+        ? ("✅ คำขอสลับวันหยุดระหว่าง " + reqName + " กับ " + tgtName + " (" + range + ") ได้รับการอนุมัติแล้วครับ")
+        : ("❌ คำขอสลับวันหยุดระหว่าง " + reqName + " กับ " + tgtName + " (" + range + ") ไม่ได้รับการอนุมัติครับ");
+      notifyOne(s, req, resultText);
+      notifyOne(s, tgt, resultText);
+      return;
+    }
+    if(s.status === "ปฏิเสธโดยเพื่อนร่วมงาน"){
+      notifyOne(s, req, "❌ " + tgtName + " ปฏิเสธคำขอสลับวันหยุดของคุณ (" + range + ") ครับ");
+      return;
+    }
+    if(s.status === "รอเพื่อนยืนยัน"){
+      notifyOne(s, tgt, "🔁 " + reqName + " ขอสลับวันหยุดกับคุณ (" + range + ") — เข้าแอป FaceClock HR เพื่อยืนยันครับ");
+      return;
+    }
+    if(s.status === "รออนุมัติ"){
+      var text = "🔁 " + reqName + " ↔ " + tgtName + " ขอสลับวันหยุด (" + range + ") เพื่อนยืนยันแล้ว รออนุมัติ — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
+      var sharedSupervisor = req.supervisorId && tgt.supervisorId && req.supervisorId === tgt.supervisorId ? empById[req.supervisorId] : null;
+      if(sharedSupervisor){
+        notifyOne(s, sharedSupervisor, text);
+      } else {
+        hrTargets.forEach(function(t){ notifyOne(s, t, text); });
+      }
+    }
+  });
+
+  await Promise.all(jobs);
+}
+
+// Notifies the self-swap chain — identical two-stage approval chain to leaves (requester's supervisor,
+// then HR, once the request reaches a final result the requester is notified). Owner gets a CC of
+// every stage, same as leave notifications.
+async function processSelfSwapNotifications(){
+  var results = await Promise.all([
+    db.collection("employees").get(),
+    db.collection("selfSwapRequests").get(),
+    db.collection("telegramSelfSwapNotified").get()
+  ]);
+  var empSnap = results[0], reqSnap = results[1], notifiedSnap = results[2];
+
+  var empById = {};
+  var hrTargets = [];
+  empSnap.forEach(function(doc){
+    var e = Object.assign({ id: doc.id }, doc.data());
+    empById[e.id] = e;
+    if(HR_ROLES[e.role] && e.telegramChatId) hrTargets.push(e);
+  });
+  var owner = empById[OWNER_UID];
+
+  var notified = {};
+  notifiedSnap.forEach(function(doc){
+    var n = doc.data();
+    notified[n.reqId + "_" + n.status + "_" + n.targetEmpId] = true;
+  });
+
+  var jobs = [];
+
+  function sendAndMark(r, chatId, targetEmpId, text){
+    var key = r.id + "_" + r.status + "_" + targetEmpId;
+    if(notified[key]) return;
+    notified[key] = true;
+    jobs.push(
+      tgCall("sendMessage", { chat_id: chatId, text: text }).then(function(){
+        return db.collection("telegramSelfSwapNotified").add({ reqId: r.id, status: r.status, targetEmpId: targetEmpId, sentAt: new Date().toISOString() });
+      })
+    );
+  }
+
+  function ccOwner(r, text){
+    if(!owner || !owner.telegramChatId) return;
+    sendAndMark(r, owner.telegramChatId, "CC_" + OWNER_UID, "👁 (สำเนาแจ้งเตือน)\n" + text);
+  }
+
+  function notifyTarget(r, target, requesterName, stageText){
+    var range = "หยุด " + r.myDate + " / ทำงานแทน " + r.theirDate;
+    var text = "🔁 " + requesterName + " ขอเปลี่ยนวันหยุดของตัวเอง (" + range + ")\nเหตุผล: " + (r.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
+    if(target.telegramChatId) sendAndMark(r, target.telegramChatId, target.id, text);
+    if(target.id !== OWNER_UID) ccOwner(r, text);
+  }
+
+  function notifyRequesterResult(r, requester){
+    var range = "หยุด " + r.myDate + " / ทำงานแทน " + r.theirDate;
+    var text = r.status === "อนุมัติแล้ว"
+      ? ("✅ คำขอเปลี่ยนวันหยุดของคุณ (" + range + ") ได้รับการอนุมัติแล้วครับ")
+      : ("❌ คำขอเปลี่ยนวันหยุดของคุณ (" + range + ") ไม่ได้รับการอนุมัติครับ");
+    if(requester.telegramChatId) sendAndMark(r, requester.telegramChatId, requester.id, text);
+    if(requester.id !== OWNER_UID) ccOwner(r, text);
+  }
+
+  reqSnap.forEach(function(doc){
+    var r = Object.assign({ id: doc.id }, doc.data());
+    var requester = empById[r.empId];
+    if(!requester) return;
+
+    if(r.status === "อนุมัติแล้ว" || r.status === "ไม่อนุมัติ"){
+      notifyRequesterResult(r, requester);
+      return;
+    }
+    if(r.status !== "รออนุมัติ (หัวหน้าทีม)" && r.status !== "รออนุมัติ (HR)") return;
+    var requesterName = requester.nickname || requester.name;
+
+    if(r.status === "รออนุมัติ (HR)"){
+      hrTargets.forEach(function(t){ notifyTarget(r, t, requesterName, "รอ HR อนุมัติ"); });
+      return;
+    }
+    if(requester.supervisorId){
+      var supervisor = empById[requester.supervisorId];
+      if(supervisor && supervisor.telegramChatId) notifyTarget(r, supervisor, requesterName, "รอคุณอนุมัติในฐานะหัวหน้าทีม");
+    } else {
+      hrTargets.forEach(function(t){ notifyTarget(r, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR"); });
     }
   });
 
@@ -307,6 +493,12 @@ async function processAnnouncementNotifications(){
   try{
     await processLeaveNotifications();
   }catch(e){ console.error("leave notification error", e); }
+  try{
+    await processSwapNotifications();
+  }catch(e){ console.error("swap notification error", e); }
+  try{
+    await processSelfSwapNotifications();
+  }catch(e){ console.error("self-swap notification error", e); }
   try{
     await processAnnouncementNotifications();
   }catch(e){ console.error("announcement notification error", e); }
