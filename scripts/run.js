@@ -90,6 +90,25 @@ function effectiveShift(emp, overridesByKey, dateISO){
   };
 }
 
+// Mirrors the main app's isDayOff(emp, d) (faceclock-firebase.html) — a day is off when an explicit
+// shiftOverride says so, else when it's a company holiday, else when it matches the employee's weekly
+// daysOff, else (no daysOff configured) when it's a weekend. Needed so reminders don't fire on days the
+// employee isn't expected to work at all — date-only math, no local timezone dependency (dateISO is
+// already Thai-calendar-aligned via todayISO()).
+function weekdayOf(dateISO){
+  var p = dateISO.split("-");
+  return new Date(Date.UTC(+p[0], +p[1]-1, +p[2])).getUTCDay();
+}
+function isDayOff(emp, dateISO, overridesByKey, holidaySet){
+  var o = overridesByKey[emp.id + "_" + dateISO];
+  if(o && o.dayType === "off") return true;
+  if(o && o.dayType === "work") return false;
+  if(holidaySet[dateISO]) return true;
+  if(emp.daysOff && emp.daysOff.length) return emp.daysOff.indexOf(weekdayOf(dateISO)) !== -1;
+  var w = weekdayOf(dateISO);
+  return w === 0 || w === 6;
+}
+
 async function processReminders(){
   var date = todayISO();
   var nowMin = nowMinutes();
@@ -98,15 +117,19 @@ async function processReminders(){
     db.collection("employees").get(),
     db.collection("shiftOverrides").where("date", "==", date).get(),
     db.collection("attendance").where("date", "==", date).get(),
-    db.collection("telegramReminders").where("date", "==", date).get()
+    db.collection("telegramReminders").where("date", "==", date).get(),
+    db.collection("holidays").get()
   ]);
-  var empSnap = results[0], overSnap = results[1], attSnap = results[2], remindedSnap = results[3];
+  var empSnap = results[0], overSnap = results[1], attSnap = results[2], remindedSnap = results[3], holidaySnap = results[4];
 
   var overridesByKey = {};
   overSnap.forEach(function(doc){
     var o = doc.data();
     overridesByKey[o.empId + "_" + o.date] = o;
   });
+
+  var holidaySet = {};
+  holidaySnap.forEach(function(doc){ holidaySet[doc.data().date] = true; });
 
   var attByEmp = {};
   attSnap.forEach(function(doc){
@@ -136,6 +159,7 @@ async function processReminders(){
     if(emp.active === false) return;
     if(!emp.telegramChatId) return;
     if(emp.dailyOnly && !overridesByKey[emp.id + "_" + date]) return; // no shift set today, nothing to remind about
+    if(isDayOff(emp, date, overridesByKey, holidaySet)) return; // today is this employee's day off, nothing to remind about
 
     var eff = effectiveShift(emp, overridesByKey, date);
     var rec = attByEmp[emp.id];
