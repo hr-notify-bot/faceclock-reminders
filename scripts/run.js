@@ -158,6 +158,7 @@ async function processReminders(){
     var emp = Object.assign({ id: empDoc.id }, empDoc.data());
     if(emp.active === false) return;
     if(!emp.telegramChatId) return;
+    if(emp.role === "ceo") return; // CEO is the owner — not expected to clock in/out, so no personal shift reminders
     if(emp.dailyOnly && !overridesByKey[emp.id + "_" + date]) return; // no shift set today, nothing to remind about
     if(isDayOff(emp, date, overridesByKey, holidaySet)) return; // today is this employee's day off, nothing to remind about
 
@@ -190,14 +191,16 @@ async function processReminders(){
 }
 
 var HR_ROLES = { hr: 1, admin: 1, ceo: 1 };
-var OWNER_UID = "DRcDoZia2uQmxvYXN5cM61JX5h23";
+// Everyone who gets a CC copy of every approval-chain stage (leave/swap/self-swap), regardless of
+// whether they're the direct approver at that stage — the original owner plus both CEO accounts.
+var CC_UIDS = ["DRcDoZia2uQmxvYXN5cM61JX5h23", "ExsAKxYnBDbxPnOjIskDCkUmh0x2", "UsPXNk2TjLhD4uWZa5jYGyDJtCm2"];
 
 // Separate from processReminders() above — does not touch or depend on the check-in/out shift reminders at all.
 // Notifies whoever is the current required approver (same chain as the app's canApprove()/requiredApproverUidFor()):
 // the requester's own supervisor while a leave is at "รออนุมัติ (หัวหน้าทีม)" (or every connected HR/admin/ceo if
 // the requester has no supervisor), then every connected HR/admin/ceo once it reaches "รออนุมัติ (HR)".
 // Also notifies the REQUESTER once the leave reaches a final result ("อนุมัติแล้ว" or "ไม่อนุมัติ").
-// The owner (OWNER_UID) additionally gets a CC copy of every stage so they can follow the whole chain
+// Everyone in CC_UIDS additionally gets a CC copy of every stage so they can follow the whole chain
 // without having to be the direct approver at each step — requested after a routing mix-up where they
 // only saw the later-stage message and assumed it was the first/only one.
 async function processLeaveNotifications(){
@@ -215,7 +218,6 @@ async function processLeaveNotifications(){
     empById[e.id] = e;
     if(HR_ROLES[e.role] && e.telegramChatId) hrTargets.push(e);
   });
-  var owner = empById[OWNER_UID];
 
   var notified = {};
   notifiedSnap.forEach(function(doc){
@@ -237,8 +239,11 @@ async function processLeaveNotifications(){
   }
 
   function ccOwner(lv, text){
-    if(!owner || !owner.telegramChatId) return;
-    sendAndMark(lv, owner.telegramChatId, "CC_" + OWNER_UID, "👁 (สำเนาแจ้งเตือน)\n" + text);
+    CC_UIDS.forEach(function(uid){
+      var cc = empById[uid];
+      if(!cc || !cc.telegramChatId) return;
+      sendAndMark(lv, cc.telegramChatId, "CC_" + uid, "👁 (สำเนาแจ้งเตือน)\n" + text);
+    });
   }
 
   // stageText is addressed to the actual approver ("รอคุณอนุมัติ..."); ccStageText is the same stage
@@ -249,7 +254,7 @@ async function processLeaveNotifications(){
     var range = lv.start === lv.end ? lv.start : (lv.start + " – " + lv.end);
     var text = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
     sendAndMark(lv, target.telegramChatId, target.id, text);
-    if(target.id !== OWNER_UID){
+    if(CC_UIDS.indexOf(target.id) === -1){
       var ccText = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\nสถานะ: " + ccStageText;
       ccOwner(lv, ccText);
     }
@@ -263,7 +268,7 @@ async function processLeaveNotifications(){
       ? ("✅ ใบลา" + lv.type + " (" + range + ") ของคุณได้รับการอนุมัติแล้วครับ")
       : ("❌ ใบลา" + lv.type + " (" + range + ") ของคุณไม่ได้รับการอนุมัติครับ");
     if(requester.telegramChatId) sendAndMark(lv, requester.telegramChatId, requester.id, text);
-    if(requester.id !== OWNER_UID){
+    if(CC_UIDS.indexOf(requester.id) === -1){
       var requesterName = requester.nickname || requester.name;
       ccOwner(lv, (lv.status === "อนุมัติแล้ว" ? "✅ " : "❌ ") + requesterName + " — ใบลา" + lv.type + " (" + range + ") " + (lv.status === "อนุมัติแล้ว" ? "ได้รับการอนุมัติแล้ว" : "ไม่ได้รับการอนุมัติ"));
     }
@@ -302,7 +307,7 @@ async function processLeaveNotifications(){
 // the target coworker while "รอเพื่อนยืนยัน", then whoever approves (the requester's+target's shared
 // supervisor if both report to the same one, else every connected HR/admin/ceo) while "รออนุมัติ",
 // then the requester (and, once actually approved, the target too — their shift changes as well)
-// once the request reaches a final result. Owner gets a CC of every stage, same as leave notifications.
+// once the request reaches a final result. Everyone in CC_UIDS gets a CC of every stage, same as leave notifications.
 async function processSwapNotifications(){
   var results = await Promise.all([
     db.collection("employees").get(),
@@ -318,7 +323,6 @@ async function processSwapNotifications(){
     empById[e.id] = e;
     if(HR_ROLES[e.role] && e.telegramChatId) hrTargets.push(e);
   });
-  var owner = empById[OWNER_UID];
 
   var notified = {};
   notifiedSnap.forEach(function(doc){
@@ -340,8 +344,11 @@ async function processSwapNotifications(){
   }
 
   function ccOwner(s, text){
-    if(!owner || !owner.telegramChatId) return;
-    sendAndMark(s, owner.telegramChatId, "CC_" + OWNER_UID, "👁 (สำเนาแจ้งเตือน)\n" + text);
+    CC_UIDS.forEach(function(uid){
+      var cc = empById[uid];
+      if(!cc || !cc.telegramChatId) return;
+      sendAndMark(s, cc.telegramChatId, "CC_" + uid, "👁 (สำเนาแจ้งเตือน)\n" + text);
+    });
   }
 
   // ccText defaults to text, but any message addressed to the target as "คุณ" ("กับคุณ", "ของคุณ")
@@ -349,7 +356,7 @@ async function processSwapNotifications(){
   // see the equivalent comment in processLeaveNotifications() for why.
   function notifyOne(s, target, text, ccText){
     if(target.telegramChatId) sendAndMark(s, target.telegramChatId, target.id, text);
-    if(target.id !== OWNER_UID) ccOwner(s, ccText || text);
+    if(CC_UIDS.indexOf(target.id) === -1) ccOwner(s, ccText || text);
   }
 
   swapSnap.forEach(function(doc){
@@ -392,8 +399,8 @@ async function processSwapNotifications(){
 }
 
 // Notifies the self-swap chain — identical two-stage approval chain to leaves (requester's supervisor,
-// then HR, once the request reaches a final result the requester is notified). Owner gets a CC of
-// every stage, same as leave notifications.
+// then HR, once the request reaches a final result the requester is notified). Everyone in CC_UIDS gets
+// a CC of every stage, same as leave notifications.
 async function processSelfSwapNotifications(){
   var results = await Promise.all([
     db.collection("employees").get(),
@@ -409,7 +416,6 @@ async function processSelfSwapNotifications(){
     empById[e.id] = e;
     if(HR_ROLES[e.role] && e.telegramChatId) hrTargets.push(e);
   });
-  var owner = empById[OWNER_UID];
 
   var notified = {};
   notifiedSnap.forEach(function(doc){
@@ -431,8 +437,11 @@ async function processSelfSwapNotifications(){
   }
 
   function ccOwner(r, text){
-    if(!owner || !owner.telegramChatId) return;
-    sendAndMark(r, owner.telegramChatId, "CC_" + OWNER_UID, "👁 (สำเนาแจ้งเตือน)\n" + text);
+    CC_UIDS.forEach(function(uid){
+      var cc = empById[uid];
+      if(!cc || !cc.telegramChatId) return;
+      sendAndMark(r, cc.telegramChatId, "CC_" + uid, "👁 (สำเนาแจ้งเตือน)\n" + text);
+    });
   }
 
   // ccStageText is the neutral/third-person version of stageText — see the comment on the equivalent
@@ -441,7 +450,7 @@ async function processSelfSwapNotifications(){
     var range = "หยุด " + r.myDate + " / ทำงานแทน " + r.theirDate;
     var text = "🔁 " + requesterName + " ขอเปลี่ยนวันหยุดของตัวเอง (" + range + ")\nเหตุผล: " + (r.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
     if(target.telegramChatId) sendAndMark(r, target.telegramChatId, target.id, text);
-    if(target.id !== OWNER_UID){
+    if(CC_UIDS.indexOf(target.id) === -1){
       var ccText = "🔁 " + requesterName + " ขอเปลี่ยนวันหยุดของตัวเอง (" + range + ")\nเหตุผล: " + (r.reason || "-") + "\nสถานะ: " + ccStageText;
       ccOwner(r, ccText);
     }
@@ -453,7 +462,7 @@ async function processSelfSwapNotifications(){
       ? ("✅ คำขอเปลี่ยนวันหยุดของคุณ (" + range + ") ได้รับการอนุมัติแล้วครับ")
       : ("❌ คำขอเปลี่ยนวันหยุดของคุณ (" + range + ") ไม่ได้รับการอนุมัติครับ");
     if(requester.telegramChatId) sendAndMark(r, requester.telegramChatId, requester.id, text);
-    if(requester.id !== OWNER_UID){
+    if(CC_UIDS.indexOf(requester.id) === -1){
       var requesterName = requester.nickname || requester.name;
       ccOwner(r, (r.status === "อนุมัติแล้ว" ? "✅ " : "❌ ") + requesterName + " — คำขอเปลี่ยนวันหยุด (" + range + ") " + (r.status === "อนุมัติแล้ว" ? "ได้รับการอนุมัติแล้ว" : "ไม่ได้รับการอนุมัติ"));
     }
