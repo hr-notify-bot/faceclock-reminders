@@ -122,6 +122,9 @@ async function processReminders(){
   ]);
   var empSnap = results[0], overSnap = results[1], attSnap = results[2], remindedSnap = results[3], holidaySnap = results[4];
 
+  var empById = {};
+  empSnap.forEach(function(doc){ empById[doc.id] = Object.assign({ id: doc.id }, doc.data()); });
+
   var overridesByKey = {};
   overSnap.forEach(function(doc){
     var o = doc.data();
@@ -145,6 +148,15 @@ async function processReminders(){
 
   var jobs = [];
 
+  // Short label per reminder type, for the CC notice below — just "a reminder was sent", not the
+  // full reminder text, to keep the CC copy brief since this fires per employee per shift edge.
+  var REMIND_LABELS = {
+    in_before: "ใกล้ถึงเวลาเข้างาน", in_after: "เลยเวลาเข้างานแล้ว",
+    out_before: "ใกล้ถึงเวลาเลิกงาน", out_after: "เลยเวลาเลิกงานแล้ว"
+  };
+  // CC_UIDS (owner + both CEOs, defined below) also gets a brief notice whenever a check-in/out
+  // reminder is sent to any employee, so they can see reminders are actually going out without
+  // being the employee receiving them — bundled into the same dedup-guarded call so it never double-sends.
   function remind(emp, type, text){
     if(reminded[emp.id + "_" + type]) return;
     jobs.push(
@@ -152,10 +164,17 @@ async function processReminders(){
         return db.collection("telegramReminders").add({ empId: emp.id, date: date, type: type, sentAt: new Date().toISOString() });
       })
     );
+    var empName = emp.nickname || emp.name;
+    CC_UIDS.forEach(function(uid){
+      if(uid === emp.id) return;
+      var cc = empById[uid];
+      if(!cc || !cc.telegramChatId) return;
+      jobs.push(tgCall("sendMessage", { chat_id: cc.telegramChatId, text: "👁 ส่งแจ้งเตือนให้ " + empName + " แล้วครับ (" + REMIND_LABELS[type] + ")" }));
+    });
   }
 
   empSnap.forEach(function(empDoc){
-    var emp = Object.assign({ id: empDoc.id }, empDoc.data());
+    var emp = empById[empDoc.id];
     if(emp.active === false) return;
     if(!emp.telegramChatId) return;
     if(emp.role === "ceo") return; // CEO is the owner — not expected to clock in/out, so no personal shift reminders
@@ -307,7 +326,7 @@ async function processLeaveNotifications(){
 // the target coworker while "รอเพื่อนยืนยัน", then whoever approves (the requester's+target's shared
 // supervisor if both report to the same one, else every connected HR/admin/ceo) while "รออนุมัติ",
 // then the requester (and, once actually approved, the target too — their shift changes as well)
-// once the request reaches a final result. Everyone in CC_UIDS gets a CC of every stage, same as leave notifications.
+// once the request reaches a final result. Owner gets a CC of every stage, same as leave notifications.
 async function processSwapNotifications(){
   var results = await Promise.all([
     db.collection("employees").get(),
@@ -399,8 +418,8 @@ async function processSwapNotifications(){
 }
 
 // Notifies the self-swap chain — identical two-stage approval chain to leaves (requester's supervisor,
-// then HR, once the request reaches a final result the requester is notified). Everyone in CC_UIDS gets
-// a CC of every stage, same as leave notifications.
+// then HR, once the request reaches a final result the requester is notified). Owner gets a CC of
+// every stage, same as leave notifications.
 async function processSelfSwapNotifications(){
   var results = await Promise.all([
     db.collection("employees").get(),
