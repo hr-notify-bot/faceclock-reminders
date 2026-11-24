@@ -148,15 +148,12 @@ async function processReminders(){
 
   var jobs = [];
 
-  // Short label per reminder type, for the CC notice below — just "a reminder was sent", not the
-  // full reminder text, to keep the CC copy brief since this fires per employee per shift edge.
-  var REMIND_LABELS = {
-    in_before: "ใกล้ถึงเวลาเข้างาน", in_after: "เลยเวลาเข้างานแล้ว",
-    out_before: "ใกล้ถึงเวลาเลิกงาน", out_after: "เลยเวลาเลิกงานแล้ว"
-  };
-  // CC_UIDS (owner + both CEOs, defined below) also gets a brief notice whenever a check-in/out
-  // reminder is sent to any employee, so they can see reminders are actually going out without
-  // being the employee receiving them — bundled into the same dedup-guarded call so it never double-sends.
+  // CC_UIDS (owner + both CEOs, defined below) gets ONE consolidated alert per run listing anyone
+  // who's actually missed a scan (the "_after" — deadline-passed — reminders only, not the "_before"
+  // heads-up ones, since those aren't a problem yet). Silent when nobody missed anything: replaced
+  // a per-employee-per-reminder CC (up to 4 messages × every employee × every day) that was both too
+  // noisy to be useful and added to the Firestore read-quota overage.
+  var missed = [];
   function remind(emp, type, text){
     if(reminded[emp.id + "_" + type]) return;
     jobs.push(
@@ -164,13 +161,8 @@ async function processReminders(){
         return db.collection("telegramReminders").add({ empId: emp.id, date: date, type: type, sentAt: new Date().toISOString() });
       })
     );
-    var empName = emp.nickname || emp.name;
-    CC_UIDS.forEach(function(uid){
-      if(uid === emp.id) return;
-      var cc = empById[uid];
-      if(!cc || !cc.telegramChatId) return;
-      jobs.push(tgCall("sendMessage", { chat_id: cc.telegramChatId, text: "👁 ส่งแจ้งเตือนให้ " + empName + " แล้วครับ (" + REMIND_LABELS[type] + ")" }));
-    });
+    if(type === "in_after") missed.push((emp.nickname || emp.name) + " (ยังไม่สแกนเข้างาน)");
+    if(type === "out_after") missed.push((emp.nickname || emp.name) + " (ยังไม่สแกนออกงาน)");
   }
 
   empSnap.forEach(function(empDoc){
@@ -205,6 +197,22 @@ async function processReminders(){
       }
     }
   });
+
+  if(missed.length){
+    var missedText = "⚠️ มีพนักงานยังไม่ได้สแกนหน้า:\n- " + missed.join("\n- ");
+    // Owner + both CEOs (CC_UIDS) plus every connected HR-role employee — deduped so nobody who's
+    // in both lists gets it twice.
+    var missedTargets = CC_UIDS.slice();
+    empSnap.forEach(function(doc){ if(doc.data().role === "hr") missedTargets.push(doc.id); });
+    var sentTo = {};
+    missedTargets.forEach(function(uid){
+      if(sentTo[uid]) return;
+      sentTo[uid] = true;
+      var cc = empById[uid];
+      if(!cc || !cc.telegramChatId) return;
+      jobs.push(tgCall("sendMessage", { chat_id: cc.telegramChatId, text: missedText }));
+    });
+  }
 
   await Promise.all(jobs);
 }
