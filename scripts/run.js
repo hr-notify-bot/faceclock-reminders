@@ -263,8 +263,15 @@ async function processLeaveNotifications(empSnap){
     );
   }
 
-  function ccOwner(lv, text){
+  // excludeIds lists who NOT to CC — normally just the person(s) who already got the direct message
+  // in this same event, never "skip the whole CC list because someone in it happened to be the direct
+  // recipient" (that was the bug: when the direct target was itself a CC_UIDS member, e.g. a
+  // supervisor who is also a CEO, the old code skipped CC'ing entirely, so the OTHER CC_UIDS members —
+  // including the owner, even on their OWN leave request — never heard about it at all).
+  function ccOwner(lv, text, excludeIds){
+    excludeIds = excludeIds || [];
     CC_UIDS.forEach(function(uid){
+      if(excludeIds.indexOf(uid) !== -1) return;
       var cc = empById[uid];
       if(!cc || !cc.telegramChatId) return;
       sendAndMark(lv, cc.telegramChatId, "CC_" + uid, "👁 (สำเนาแจ้งเตือน)\n" + text);
@@ -275,14 +282,15 @@ async function processLeaveNotifications(empSnap){
   // described in neutral/third-person form, since the owner's CC copy isn't necessarily the one who
   // needs to act (e.g. they aren't HR, just watching) — reusing stageText verbatim in the CC would
   // wrongly claim "you, as HR, need to approve this" even when the owner holds a different role.
-  function notifyTarget(lv, target, requesterName, stageText, ccStageText){
+  // excludeIds defaults to just [target.id]; callers notifying several direct targets at once (e.g.
+  // every HR-role employee) pass the full set of those targets' ids so the one shared CC pass doesn't
+  // re-notify any of them while still reaching the rest of CC_UIDS.
+  function notifyTarget(lv, target, requesterName, stageText, ccStageText, excludeIds){
     var range = lv.start === lv.end ? lv.start : (lv.start + " – " + lv.end);
     var text = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
     sendAndMark(lv, target.telegramChatId, target.id, text);
-    if(CC_UIDS.indexOf(target.id) === -1){
-      var ccText = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\nสถานะ: " + ccStageText;
-      ccOwner(lv, ccText);
-    }
+    var ccText = "📋 " + requesterName + " ยื่น" + lv.type + " (" + range + ")\nเหตุผล: " + (lv.reason || "-") + "\nสถานะ: " + ccStageText;
+    ccOwner(lv, ccText, excludeIds || [target.id]);
   }
 
   // Notifies the REQUESTER once their leave reaches a final result (approved or rejected) — separate
@@ -293,10 +301,8 @@ async function processLeaveNotifications(empSnap){
       ? ("✅ ใบลา" + lv.type + " (" + range + ") ของคุณได้รับการอนุมัติแล้วครับ")
       : ("❌ ใบลา" + lv.type + " (" + range + ") ของคุณไม่ได้รับการอนุมัติครับ");
     if(requester.telegramChatId) sendAndMark(lv, requester.telegramChatId, requester.id, text);
-    if(CC_UIDS.indexOf(requester.id) === -1){
-      var requesterName = requester.nickname || requester.name;
-      ccOwner(lv, (lv.status === "อนุมัติแล้ว" ? "✅ " : "❌ ") + requesterName + " — ใบลา" + lv.type + " (" + range + ") " + (lv.status === "อนุมัติแล้ว" ? "ได้รับการอนุมัติแล้ว" : "ไม่ได้รับการอนุมัติ"));
-    }
+    var requesterName = requester.nickname || requester.name;
+    ccOwner(lv, (lv.status === "อนุมัติแล้ว" ? "✅ " : "❌ ") + requesterName + " — ใบลา" + lv.type + " (" + range + ") " + (lv.status === "อนุมัติแล้ว" ? "ได้รับการอนุมัติแล้ว" : "ไม่ได้รับการอนุมัติ"), [requester.id]);
   }
 
   leaveSnap.forEach(function(doc){
@@ -312,7 +318,8 @@ async function processLeaveNotifications(empSnap){
     var requesterName = requester.nickname || requester.name;
 
     if(lv.status === "รออนุมัติ (HR)"){
-      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "รอ HR อนุมัติ", "รอ HR อนุมัติ"); });
+      var hrIds = hrTargets.map(function(t){ return t.id; });
+      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "รอ HR อนุมัติ", "รอ HR อนุมัติ", hrIds); });
       return;
     }
     // รออนุมัติ (หัวหน้าทีม)
@@ -321,7 +328,8 @@ async function processLeaveNotifications(empSnap){
       if(supervisor && supervisor.telegramChatId) notifyTarget(lv, supervisor, requesterName, "รอคุณอนุมัติในฐานะหัวหน้าทีม", "รอหัวหน้าทีมอนุมัติ");
     } else {
       // no supervisor assigned — this employee reports straight to HR, so the recipient here is acting as HR, not as "their supervisor"
-      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR", "ไม่มีหัวหน้าทีม รอ HR อนุมัติ"); });
+      var hrIds2 = hrTargets.map(function(t){ return t.id; });
+      hrTargets.forEach(function(t){ notifyTarget(lv, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR", "ไม่มีหัวหน้าทีม รอ HR อนุมัติ", hrIds2); });
     }
   });
 
@@ -367,8 +375,12 @@ async function processSwapNotifications(empSnap){
     );
   }
 
-  function ccOwner(s, text){
+  // excludeIds: who NOT to CC — see the equivalent comment on ccOwner() in processLeaveNotifications()
+  // for why this can never be "skip the whole CC pass because the direct target is a CC_UIDS member".
+  function ccOwner(s, text, excludeIds){
+    excludeIds = excludeIds || [];
     CC_UIDS.forEach(function(uid){
+      if(excludeIds.indexOf(uid) !== -1) return;
       var cc = empById[uid];
       if(!cc || !cc.telegramChatId) return;
       sendAndMark(s, cc.telegramChatId, "CC_" + uid, "👁 (สำเนาแจ้งเตือน)\n" + text);
@@ -378,9 +390,9 @@ async function processSwapNotifications(empSnap){
   // ccText defaults to text, but any message addressed to the target as "คุณ" ("กับคุณ", "ของคุณ")
   // needs a neutral third-person version instead, since the owner's CC copy may not be that target —
   // see the equivalent comment in processLeaveNotifications() for why.
-  function notifyOne(s, target, text, ccText){
+  function notifyOne(s, target, text, ccText, excludeIds){
     if(target.telegramChatId) sendAndMark(s, target.telegramChatId, target.id, text);
-    if(CC_UIDS.indexOf(target.id) === -1) ccOwner(s, ccText || text);
+    ccOwner(s, ccText || text, excludeIds || [target.id]);
   }
 
   swapSnap.forEach(function(doc){
@@ -394,8 +406,9 @@ async function processSwapNotifications(empSnap){
       var resultText = s.status === "อนุมัติแล้ว"
         ? ("✅ คำขอสลับวันหยุดระหว่าง " + reqName + " กับ " + tgtName + " (" + range + ") ได้รับการอนุมัติแล้วครับ")
         : ("❌ คำขอสลับวันหยุดระหว่าง " + reqName + " กับ " + tgtName + " (" + range + ") ไม่ได้รับการอนุมัติครับ");
-      notifyOne(s, req, resultText);
-      notifyOne(s, tgt, resultText);
+      if(req.telegramChatId) sendAndMark(s, req.telegramChatId, req.id, resultText);
+      if(tgt.telegramChatId) sendAndMark(s, tgt.telegramChatId, tgt.id, resultText);
+      ccOwner(s, resultText, [req.id, tgt.id]);
       return;
     }
     if(s.status === "ปฏิเสธโดยเพื่อนร่วมงาน"){
@@ -414,7 +427,8 @@ async function processSwapNotifications(empSnap){
       if(sharedSupervisor){
         notifyOne(s, sharedSupervisor, text);
       } else {
-        hrTargets.forEach(function(t){ notifyOne(s, t, text); });
+        var hrIds = hrTargets.map(function(t){ return t.id; });
+        hrTargets.forEach(function(t){ notifyOne(s, t, text, null, hrIds); });
       }
     }
   });
@@ -459,8 +473,12 @@ async function processSelfSwapNotifications(empSnap){
     );
   }
 
-  function ccOwner(r, text){
+  // excludeIds: who NOT to CC — see the equivalent comment on ccOwner() in processLeaveNotifications()
+  // for why this can never be "skip the whole CC pass because the direct target is a CC_UIDS member".
+  function ccOwner(r, text, excludeIds){
+    excludeIds = excludeIds || [];
     CC_UIDS.forEach(function(uid){
+      if(excludeIds.indexOf(uid) !== -1) return;
       var cc = empById[uid];
       if(!cc || !cc.telegramChatId) return;
       sendAndMark(r, cc.telegramChatId, "CC_" + uid, "👁 (สำเนาแจ้งเตือน)\n" + text);
@@ -469,14 +487,12 @@ async function processSelfSwapNotifications(empSnap){
 
   // ccStageText is the neutral/third-person version of stageText — see the comment on the equivalent
   // function in processLeaveNotifications() for why the CC copy can't just reuse the "รอคุณอนุมัติ..." text.
-  function notifyTarget(r, target, requesterName, stageText, ccStageText){
+  function notifyTarget(r, target, requesterName, stageText, ccStageText, excludeIds){
     var range = "หยุด " + r.myDate + " / ทำงานแทน " + r.theirDate;
     var text = "🔁 " + requesterName + " ขอเปลี่ยนวันหยุดของตัวเอง (" + range + ")\nเหตุผล: " + (r.reason || "-") + "\n" + stageText + " — เข้าแอป FaceClock HR เพื่ออนุมัติครับ";
     if(target.telegramChatId) sendAndMark(r, target.telegramChatId, target.id, text);
-    if(CC_UIDS.indexOf(target.id) === -1){
-      var ccText = "🔁 " + requesterName + " ขอเปลี่ยนวันหยุดของตัวเอง (" + range + ")\nเหตุผล: " + (r.reason || "-") + "\nสถานะ: " + ccStageText;
-      ccOwner(r, ccText);
-    }
+    var ccText = "🔁 " + requesterName + " ขอเปลี่ยนวันหยุดของตัวเอง (" + range + ")\nเหตุผล: " + (r.reason || "-") + "\nสถานะ: " + ccStageText;
+    ccOwner(r, ccText, excludeIds || [target.id]);
   }
 
   function notifyRequesterResult(r, requester){
@@ -485,10 +501,8 @@ async function processSelfSwapNotifications(empSnap){
       ? ("✅ คำขอเปลี่ยนวันหยุดของคุณ (" + range + ") ได้รับการอนุมัติแล้วครับ")
       : ("❌ คำขอเปลี่ยนวันหยุดของคุณ (" + range + ") ไม่ได้รับการอนุมัติครับ");
     if(requester.telegramChatId) sendAndMark(r, requester.telegramChatId, requester.id, text);
-    if(CC_UIDS.indexOf(requester.id) === -1){
-      var requesterName = requester.nickname || requester.name;
-      ccOwner(r, (r.status === "อนุมัติแล้ว" ? "✅ " : "❌ ") + requesterName + " — คำขอเปลี่ยนวันหยุด (" + range + ") " + (r.status === "อนุมัติแล้ว" ? "ได้รับการอนุมัติแล้ว" : "ไม่ได้รับการอนุมัติ"));
-    }
+    var requesterName = requester.nickname || requester.name;
+    ccOwner(r, (r.status === "อนุมัติแล้ว" ? "✅ " : "❌ ") + requesterName + " — คำขอเปลี่ยนวันหยุด (" + range + ") " + (r.status === "อนุมัติแล้ว" ? "ได้รับการอนุมัติแล้ว" : "ไม่ได้รับการอนุมัติ"), [requester.id]);
   }
 
   reqSnap.forEach(function(doc){
@@ -504,14 +518,16 @@ async function processSelfSwapNotifications(empSnap){
     var requesterName = requester.nickname || requester.name;
 
     if(r.status === "รออนุมัติ (HR)"){
-      hrTargets.forEach(function(t){ notifyTarget(r, t, requesterName, "รอ HR อนุมัติ", "รอ HR อนุมัติ"); });
+      var hrIds = hrTargets.map(function(t){ return t.id; });
+      hrTargets.forEach(function(t){ notifyTarget(r, t, requesterName, "รอ HR อนุมัติ", "รอ HR อนุมัติ", hrIds); });
       return;
     }
     if(requester.supervisorId){
       var supervisor = empById[requester.supervisorId];
       if(supervisor && supervisor.telegramChatId) notifyTarget(r, supervisor, requesterName, "รอคุณอนุมัติในฐานะหัวหน้าทีม", "รอหัวหน้าทีมอนุมัติ");
     } else {
-      hrTargets.forEach(function(t){ notifyTarget(r, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR", "ไม่มีหัวหน้าทีม รอ HR อนุมัติ"); });
+      var hrIds2 = hrTargets.map(function(t){ return t.id; });
+      hrTargets.forEach(function(t){ notifyTarget(r, t, requesterName, "ไม่มีหัวหน้าทีม รอคุณอนุมัติในฐานะ HR", "ไม่มีหัวหน้าทีม รอ HR อนุมัติ", hrIds2); });
     }
   });
 
