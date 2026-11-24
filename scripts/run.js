@@ -109,18 +109,17 @@ function isDayOff(emp, dateISO, overridesByKey, holidaySet){
   return w === 0 || w === 6;
 }
 
-async function processReminders(){
+async function processReminders(empSnap){
   var date = todayISO();
   var nowMin = nowMinutes();
 
   var results = await Promise.all([
-    db.collection("employees").get(),
     db.collection("shiftOverrides").where("date", "==", date).get(),
     db.collection("attendance").where("date", "==", date).get(),
     db.collection("telegramReminders").where("date", "==", date).get(),
     db.collection("holidays").get()
   ]);
-  var empSnap = results[0], overSnap = results[1], attSnap = results[2], remindedSnap = results[3], holidaySnap = results[4];
+  var overSnap = results[0], attSnap = results[1], remindedSnap = results[2], holidaySnap = results[3];
 
   var empById = {};
   empSnap.forEach(function(doc){ empById[doc.id] = Object.assign({ id: doc.id }, doc.data()); });
@@ -230,13 +229,12 @@ var CC_UIDS = ["DRcDoZia2uQmxvYXN5cM61JX5h23", "ExsAKxYnBDbxPnOjIskDCkUmh0x2", "
 // Everyone in CC_UIDS additionally gets a CC copy of every stage so they can follow the whole chain
 // without having to be the direct approver at each step — requested after a routing mix-up where they
 // only saw the later-stage message and assumed it was the first/only one.
-async function processLeaveNotifications(){
+async function processLeaveNotifications(empSnap){
   var results = await Promise.all([
-    db.collection("employees").get(),
     db.collection("leaves").get(),
     db.collection("telegramLeaveNotified").get()
   ]);
-  var empSnap = results[0], leaveSnap = results[1], notifiedSnap = results[2];
+  var leaveSnap = results[0], notifiedSnap = results[1];
 
   var empById = {};
   var hrTargets = [];
@@ -335,13 +333,12 @@ async function processLeaveNotifications(){
 // supervisor if both report to the same one, else every connected HR/admin/ceo) while "รออนุมัติ",
 // then the requester (and, once actually approved, the target too — their shift changes as well)
 // once the request reaches a final result. Owner gets a CC of every stage, same as leave notifications.
-async function processSwapNotifications(){
+async function processSwapNotifications(empSnap){
   var results = await Promise.all([
-    db.collection("employees").get(),
     db.collection("swapRequests").get(),
     db.collection("telegramSwapNotified").get()
   ]);
-  var empSnap = results[0], swapSnap = results[1], notifiedSnap = results[2];
+  var swapSnap = results[0], notifiedSnap = results[1];
 
   var empById = {};
   var hrTargets = [];
@@ -428,13 +425,12 @@ async function processSwapNotifications(){
 // Notifies the self-swap chain — identical two-stage approval chain to leaves (requester's supervisor,
 // then HR, once the request reaches a final result the requester is notified). Owner gets a CC of
 // every stage, same as leave notifications.
-async function processSelfSwapNotifications(){
+async function processSelfSwapNotifications(empSnap){
   var results = await Promise.all([
-    db.collection("employees").get(),
     db.collection("selfSwapRequests").get(),
     db.collection("telegramSelfSwapNotified").get()
   ]);
-  var empSnap = results[0], reqSnap = results[1], notifiedSnap = results[2];
+  var reqSnap = results[0], notifiedSnap = results[1];
 
   var empById = {};
   var hrTargets = [];
@@ -524,13 +520,12 @@ async function processSelfSwapNotifications(){
 
 // Separate from the functions above — notifies every connected, active employee once per new
 // company announcement (dedup via telegramAnnouncementNotified, keyed by announcement+employee).
-async function processAnnouncementNotifications(){
+async function processAnnouncementNotifications(empSnap){
   var results = await Promise.all([
-    db.collection("employees").get(),
     db.collection("announcements").get(),
     db.collection("telegramAnnouncementNotified").get()
   ]);
-  var empSnap = results[0], annSnap = results[1], notifiedSnap = results[2];
+  var annSnap = results[0], notifiedSnap = results[1];
 
   var targets = [];
   empSnap.forEach(function(doc){
@@ -563,23 +558,57 @@ async function processAnnouncementNotifications(){
   await Promise.all(jobs);
 }
 
+// Dedup collections (telegramXNotified, telegramReminders) are never written to more than once per
+// key, but nothing ever deleted them — after weeks of running every ~1-2 minutes, they grew into the
+// biggest share of this project's daily Firestore read quota, since every run used to .get() each one
+// in full just to build an in-memory "already sent" lookup. Deleting entries older than STALE_DAYS
+// keeps each one bounded to roughly a month of history, so the full-collection reads below stay cheap
+// indefinitely instead of growing with the account's entire lifetime.
+var STALE_DAYS = 30;
+async function pruneStale(collectionName, dateField){
+  var cutoff = new Date(Date.now() - STALE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  var snap = await db.collection(collectionName).where(dateField, "<", cutoff).get();
+  if(snap.empty) return;
+  var batch = db.batch();
+  snap.forEach(function(doc){ batch.delete(doc.ref); });
+  await batch.commit();
+}
+
 (async function main(){
   try{
     await processRegistrations();
   }catch(e){ console.error("registration error", e); }
+
   try{
-    await processReminders();
+    await Promise.all([
+      pruneStale("telegramLeaveNotified", "sentAt"),
+      pruneStale("telegramSwapNotified", "sentAt"),
+      pruneStale("telegramSelfSwapNotified", "sentAt"),
+      pruneStale("telegramAnnouncementNotified", "sentAt"),
+      pruneStale("telegramReminders", "sentAt")
+    ]);
+  }catch(e){ console.error("prune error", e); }
+
+  // employees is read by every function below — fetched once here and passed in, instead of each
+  // function re-reading the whole collection independently (was 5x the necessary reads every run).
+  var empSnap;
+  try{
+    empSnap = await db.collection("employees").get();
+  }catch(e){ console.error("employees fetch error", e); return; }
+
+  try{
+    await processReminders(empSnap);
   }catch(e){ console.error("reminder error", e); }
   try{
-    await processLeaveNotifications();
+    await processLeaveNotifications(empSnap);
   }catch(e){ console.error("leave notification error", e); }
   try{
-    await processSwapNotifications();
+    await processSwapNotifications(empSnap);
   }catch(e){ console.error("swap notification error", e); }
   try{
-    await processSelfSwapNotifications();
+    await processSelfSwapNotifications(empSnap);
   }catch(e){ console.error("self-swap notification error", e); }
   try{
-    await processAnnouncementNotifications();
+    await processAnnouncementNotifications(empSnap);
   }catch(e){ console.error("announcement notification error", e); }
 })();
