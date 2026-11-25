@@ -590,6 +590,28 @@ async function pruneStale(collectionName, dateField){
   await batch.commit();
 }
 
+// processLeaveNotifications/processSwapNotifications/processSelfSwapNotifications/
+// processAnnouncementNotifications each .get() their whole source collection (leaves,
+// swapRequests, selfSwapRequests, announcements — none of these are pruned, unlike the
+// dedup collections above) plus their whole dedup collection, every single run. At a
+// 5-minute cron interval that's 288 full reads of each/day and was enough by itself to hit
+// the Firestore free-tier daily read quota ("Quota exceeded", gRPC code 8) on 2026-11-25.
+// These four aren't time-critical the way check-in/out reminders are (a few minutes'
+// delay on a leave-approval ping is fine), so they're gated to run only once every
+// HEAVY_INTERVAL_MIN, cutting their share of the daily read count by the same factor —
+// while processReminders() above keeps running every invocation at full frequency, since
+// its queries are already date-filtered (cheap) and its 15-minute before/after window
+// depends on the short cron interval to reliably catch each shift's deadline.
+var HEAVY_INTERVAL_MIN = 15;
+async function shouldRunHeavy(){
+  var ref = db.collection("system").doc("telegramHeavyGate");
+  var doc = await ref.get();
+  var last = doc.exists ? (doc.data().lastRunAt || 0) : 0;
+  if(Date.now() - last < HEAVY_INTERVAL_MIN * 60 * 1000) return false;
+  await ref.set({ lastRunAt: Date.now() }, { merge: true });
+  return true;
+}
+
 (async function main(){
   try{
     await processRegistrations();
@@ -615,16 +637,24 @@ async function pruneStale(collectionName, dateField){
   try{
     await processReminders(empSnap);
   }catch(e){ console.error("reminder error", e); }
+
+  var runHeavy = true;
   try{
-    await processLeaveNotifications(empSnap);
-  }catch(e){ console.error("leave notification error", e); }
-  try{
-    await processSwapNotifications(empSnap);
-  }catch(e){ console.error("swap notification error", e); }
-  try{
-    await processSelfSwapNotifications(empSnap);
-  }catch(e){ console.error("self-swap notification error", e); }
-  try{
-    await processAnnouncementNotifications(empSnap);
-  }catch(e){ console.error("announcement notification error", e); }
+    runHeavy = await shouldRunHeavy();
+  }catch(e){ console.error("heavy gate error", e); }
+
+  if(runHeavy){
+    try{
+      await processLeaveNotifications(empSnap);
+    }catch(e){ console.error("leave notification error", e); }
+    try{
+      await processSwapNotifications(empSnap);
+    }catch(e){ console.error("swap notification error", e); }
+    try{
+      await processSelfSwapNotifications(empSnap);
+    }catch(e){ console.error("self-swap notification error", e); }
+    try{
+      await processAnnouncementNotifications(empSnap);
+    }catch(e){ console.error("announcement notification error", e); }
+  }
 })();
